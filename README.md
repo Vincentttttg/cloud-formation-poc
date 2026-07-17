@@ -26,8 +26,37 @@ option-b-redesign/
   service-stack.yaml          # PER service: TG, listener rule, service, autoscaling
   params/...
 scripts/
+  validate.sh                 # validate-template + cfn-lint on all templates
   deploy.sh                   # thin wrapper: template + stack name + params file
+  teardown.sh                 # delete a stack and wait until it's gone
+  quick-test.sh               # Option A end-to-end: validate -> deploy -> curl -> teardown
 ```
+
+## Scripts
+
+All Bash (run from Git Bash or WSL on Windows). Defaults target the demo account /
+`ap-southeast-1`; override with trailing `[region] [profile]` args.
+
+```bash
+# Check all three templates before deploying (structure + deep lint):
+./scripts/validate.sh
+
+# Deploy any template:
+./scripts/deploy.sh <template.yaml> <stack-name> <params.json>
+
+# Delete a stack when done:
+./scripts/teardown.sh <stack-name>
+
+# One-shot smoke test of Option A: validate, deploy, curl the ALB until it
+# returns 200, then tear the stack down automatically:
+./scripts/quick-test.sh
+# ...leave it running afterwards instead of deleting (to poke at it):
+KEEP=1 ./scripts/quick-test.sh
+```
+
+`quick-test.sh` tears down even if the deploy or the curl fails, so it never
+leaves a half-broken stack (or its hourly ALB charge) behind unless you pass
+`KEEP=1`.
 
 ---
 
