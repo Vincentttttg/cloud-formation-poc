@@ -29,7 +29,20 @@ Sandy (Architect/DevOps) manually provisions ALB + Target Group + ECS Fargate + 
 Known BeED services: hub-api, gatekeeper, connect, experio-api, unified-library, sms, bmeet, greenlight, liam-ui, rag-api, journeys, beed-ops-console. Envs: test, stage, prod.
 
 ### Pain points the POC demonstrates fixing
-1. ~12 manual steps per service → one `aws cloudformation deploy`.
+1. ~12 manual steps per service → one `aws cloudformation deploy`. The steps Sandy performs today for each new backend service:
+   1. Create ECR repository `<service>-<env>-repo`.
+   2. Upload the service's `.env` settings file to S3 (`s3://acdstagingbucket/setting-<svc>/<svc>-<env>.env`).
+   3. Add a new inline policy `ecs-<svc>-read-appsetting-policy` to the shared `ecsTaskExecutionRole` so the task can read that env file.
+   4. Create the target group (IP target type, container port, `/health` health check with the right thresholds).
+   5. Create the dedicated ALB (`BeED-<Service>-<Env>`), pick subnets, attach the 5 shared security groups.
+   6. Add the HTTP:80 listener with the 301 redirect to HTTPS.
+   7. Add the HTTPS:443 listener with the `*.beed.world` ACM cert, forwarding to the target group.
+   8. Create the ECS cluster `<service>-cluster-<env>`.
+   9. Register the task definition (container name, image URI, port mapping, S3 env file, awslogs config, roles, CPU/memory).
+   10. Create the ECS service via console wizard (Fargate, VPC/subnets, SG, public IP, attach to TG on container port).
+   11. Wait for deployment and verify the target turns Healthy in the target group.
+   12. Create the DNS CNAME (`<svc>.beed.world` → ALB DNS name) in the external DNS provider.
+   And this whole sequence is repeated **per environment** (test / stage / prod), so a fully rolled-out service ≈ 36 manual steps.
 2. Naming typos/inconsistency (`Target-Goup`, `greenligt`) → templated names.
 3. Wide-open default SG + public task IPs → scoped SG chain.
 4. Shared execution role near policy limit → per-service roles.
