@@ -1,4 +1,8 @@
+# The CloudFormation template language version. Always this fixed date - it is
+# not "today's date", it is the format version AWS defined. Leave it as-is.
 AWSTemplateFormatVersion: '2010-09-09'
+
+# A human-readable summary of what this template creates. Shows up in the console.
 Description: >-
   BeED backend service stack (Option A - parity with current manual provisioning,
   plus safe improvements). Provisions: ECS cluster, dedicated ALB, target group,
@@ -6,103 +10,122 @@ Description: >-
   roles, Fargate task definition and service. Replaces ~12 manual console steps
   with one deploy command.
 
+# ---------------------------------------------------------------------------
+# PARAMETERS = the questions the template asks you when you deploy.
+# Think of them as the blanks you fill in (in the params/*.json file) so the
+# same template can create hub-api, gatekeeper, sms, etc. without editing it.
+# ---------------------------------------------------------------------------
 Parameters:
-  ServiceName:
-    Type: String
+  ServiceName:                          # e.g. "hub-api" - used to name everything
+    Type: String                        # a text value
     Description: Short service name, lowercase (e.g. hub-api)
-    AllowedPattern: '[a-z][a-z0-9-]*'
-    MaxLength: 20
-  Environment:
+    AllowedPattern: '[a-z][a-z0-9-]*'   # rule: must start with a letter, only lowercase/digits/dashes
+    MaxLength: 20                       # rule: no longer than 20 characters
+  Environment:                          # which environment this deploy is for
     Type: String
-    AllowedValues: [test, stage, prod]
+    AllowedValues: [test, stage, prod]  # only these 3 words are accepted
     Description: Target environment
-  ContainerPort:
-    Type: Number
+  ContainerPort:                        # the port your app listens on inside the container
+    Type: Number                        # a numeric value (e.g. 4100)
     Description: Port the container listens on (e.g. 4100)
-  ImageUri:
+  ImageUri:                             # which Docker image to run
     Type: String
     Description: Full container image URI incl. tag (ECR or public registry)
-  Cpu:
+  Cpu:                                  # how much CPU each task gets
     Type: String
-    Default: '1024'
-    AllowedValues: ['256', '512', '1024', '2048', '4096']
+    Default: '1024'                     # if you don't supply one, use 1024 (= 1 vCPU)
+    AllowedValues: ['256', '512', '1024', '2048', '4096']  # Fargate only allows these exact values
     Description: Fargate task CPU units (1024 = 1 vCPU; matches current prod default)
-  Memory:
+  Memory:                               # how much RAM each task gets, in MiB
     Type: String
-    Default: '3072'
+    Default: '3072'                     # default 3 GB, matching current prod
     Description: Fargate task memory in MiB (matches current prod default)
-  DesiredCount:
+  DesiredCount:                         # how many copies of the task to run
     Type: Number
-    Default: 1
+    Default: 1                          # prod runs a single task today
     Description: Number of tasks (current prod runs 1)
-  VpcId:
-    Type: AWS::EC2::VPC::Id
+  VpcId:                                # which network (VPC) to build inside
+    Type: AWS::EC2::VPC::Id             # special type: console shows a dropdown of your VPCs
     Description: VPC to deploy into (prod uses the default VPC vpc-df22d8bb)
-  SubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
+  SubnetIds:                            # which sub-networks the ALB and tasks live in
+    Type: List<AWS::EC2::Subnet::Id>    # special type: a list, console shows checkboxes of subnets
     Description: Public subnets for ALB and tasks (parity - no NAT exists in the default VPC)
-  CertificateArn:
+  CertificateArn:                       # the HTTPS/TLS certificate to use (optional)
     Type: String
-    Default: ''
+    Default: ''                         # empty by default so the demo works without a cert
     Description: >-
       Optional ACM certificate ARN (e.g. the *.beed.world wildcard). When empty,
       the HTTPS listener is skipped and HTTP forwards directly (demo mode).
-  HealthCheckPath:
+  HealthCheckPath:                      # URL path the load balancer pings to check the app is alive
     Type: String
-    Default: /health
+    Default: /health                    # BeED's standard health endpoint
     Description: Target group health check path (current standard is /health)
-  EnvFileS3Bucket:
+  EnvFileS3Bucket:                      # S3 bucket holding the app's .env settings file (optional)
     Type: String
     Default: ''
     Description: Optional S3 bucket holding the service .env file (current pattern - acdstagingbucket)
-  EnvFileS3Key:
+  EnvFileS3Key:                         # the path/name of that .env file inside the bucket (optional)
     Type: String
     Default: ''
     Description: Optional S3 key of the .env file (e.g. setting-hubapi/hubapi-prod.env)
-  LogRetentionDays:
+  LogRetentionDays:                     # how long to keep logs before auto-deleting them
     Type: Number
     Default: 30
     AllowedValues: [7, 14, 30, 60, 90, 180, 365]
     Description: CloudWatch log retention (improvement - current groups never expire)
-  HealthCheckGracePeriodSeconds:
+  HealthCheckGracePeriodSeconds:        # how long to wait after a task starts before health-checking it
     Type: Number
-    Default: 0
+    Default: 0                          # current prod uses 0
     Description: Grace period before ALB health checks count (current setting is 0)
 
+# ---------------------------------------------------------------------------
+# CONDITIONS = named true/false tests you can reuse below to turn things on/off.
+# ---------------------------------------------------------------------------
 Conditions:
+  # True when the user DID supply a certificate (i.e. CertificateArn is not empty).
   HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+  # True when the user DID supply an S3 env file bucket.
   HasEnvFile: !Not [!Equals [!Ref EnvFileS3Bucket, '']]
 
+# ---------------------------------------------------------------------------
+# RESOURCES = the actual AWS things this template creates.
+# CloudFormation figures out the correct order automatically based on references.
+# ---------------------------------------------------------------------------
 Resources:
   # ----- Cluster (parity: one cluster per service per environment) -----
+  # An ECS cluster is just a named "folder" that groups your running tasks.
   Cluster:
-    Type: AWS::ECS::Cluster
+    Type: AWS::ECS::Cluster             # the AWS resource type to create
     Properties:
-      ClusterName: !Sub '${ServiceName}-cluster-${Environment}'
-      CapacityProviders: [FARGATE]
+      ClusterName: !Sub '${ServiceName}-cluster-${Environment}'  # !Sub fills in the params -> "hub-api-cluster-prod"
+      CapacityProviders: [FARGATE]      # run tasks on Fargate (serverless containers, no servers to manage)
       DefaultCapacityProviderStrategy:
         - CapacityProvider: FARGATE
-          Weight: 1
+          Weight: 1                      # send 100% of tasks to Fargate
 
   # ----- Security groups (improvement: scoped chain instead of default SG) -----
+  # A security group is a virtual firewall. This one is for the load balancer.
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: !Sub 'ALB for ${ServiceName}-${Environment} - public HTTP/HTTPS'
       GroupName: !Sub 'beed-${ServiceName}-${Environment}-alb-sg'
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
+      VpcId: !Ref VpcId                 # !Ref means "use the value of" - here the VpcId parameter
+      SecurityGroupIngress:             # "ingress" = incoming traffic rules
         - IpProtocol: tcp
-          FromPort: 80
+          FromPort: 80                  # allow port 80 (HTTP)
           ToPort: 80
-          CidrIp: 0.0.0.0/0
+          CidrIp: 0.0.0.0/0             # 0.0.0.0/0 means "from anywhere on the internet"
           Description: Public HTTP
         - IpProtocol: tcp
-          FromPort: 443
+          FromPort: 443                 # allow port 443 (HTTPS)
           ToPort: 443
           CidrIp: 0.0.0.0/0
           Description: Public HTTPS
 
+  # This firewall is for the TASKS (the containers). The key improvement:
+  # it only allows traffic that comes FROM the load balancer's security group,
+  # not from the whole internet.
   TaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -111,43 +134,48 @@ Resources:
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: !Ref ContainerPort
+          FromPort: !Ref ContainerPort  # allow only the app's port (e.g. 4100)
           ToPort: !Ref ContainerPort
-          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          SourceSecurityGroupId: !Ref AlbSecurityGroup  # ONLY from the ALB - this is the security fix
           Description: Container port from ALB only
 
   # ----- Load balancer (parity: dedicated ALB per service) -----
+  # The ALB is the public front door that receives internet traffic and forwards
+  # it to your tasks. "!GetAtt LoadBalancer.DNSName" (used later) is its web address.
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: !Sub 'BeED-${ServiceName}-${Environment}'
-      Type: application
-      Scheme: internet-facing
+      Type: application                 # an Application Load Balancer (understands HTTP)
+      Scheme: internet-facing           # reachable from the public internet
       IpAddressType: ipv4
-      Subnets: !Ref SubnetIds
+      Subnets: !Ref SubnetIds           # place it in the subnets you chose
       SecurityGroups:
-        - !Ref AlbSecurityGroup
+        - !Ref AlbSecurityGroup         # attach the ALB firewall from above
 
+  # A target group is the "list of tasks" the ALB sends traffic to, plus the
+  # health-check rules that decide which tasks are healthy enough to receive it.
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       Name: !Sub 'BeED-${ServiceName}-${Environment}-tg'
       VpcId: !Ref VpcId
-      TargetType: ip
+      TargetType: ip                    # tasks register by IP address (required for Fargate)
       Protocol: HTTP
-      Port: !Ref ContainerPort
+      Port: !Ref ContainerPort          # forward to the app's port
       HealthCheckProtocol: HTTP
-      HealthCheckPath: !Ref HealthCheckPath
-      HealthCheckPort: traffic-port
-      HealthCheckIntervalSeconds: 30
-      HealthCheckTimeoutSeconds: 5
-      HealthyThresholdCount: 5
-      UnhealthyThresholdCount: 2
+      HealthCheckPath: !Ref HealthCheckPath        # ping this URL (e.g. /health)
+      HealthCheckPort: traffic-port     # health-check on the same port traffic uses
+      HealthCheckIntervalSeconds: 30    # ping every 30 seconds
+      HealthCheckTimeoutSeconds: 5      # a ping must answer within 5 seconds
+      HealthyThresholdCount: 5          # 5 good pings in a row = "healthy"
+      UnhealthyThresholdCount: 2        # 2 bad pings in a row = "unhealthy"
       Matcher:
-        HttpCode: '200'
+        HttpCode: '200'                 # a healthy answer must be HTTP status 200
 
-  # HTTP:80 - redirects to HTTPS when a certificate is supplied (parity),
-  # otherwise forwards directly so the stack works without a certificate (demo mode).
+  # A listener watches a port on the ALB and decides what to do with requests.
+  # HTTP:80 - if you gave a certificate, redirect visitors to HTTPS (secure);
+  # if not (demo mode), just forward straight to the tasks.
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -155,70 +183,77 @@ Resources:
       Port: 80
       Protocol: HTTP
       DefaultActions:
-        - !If
+        - !If                           # !If [condition, value-if-true, value-if-false]
           - HasCertificate
-          - Type: redirect
+          - Type: redirect              # TRUE branch: send the browser to https://
             RedirectConfig:
               Protocol: HTTPS
               Port: '443'
-              Host: '#{host}'
+              Host: '#{host}'           # #{host}/#{path}/#{query} keep the original URL parts
               Path: '/#{path}'
               Query: '#{query}'
-              StatusCode: HTTP_301
-          - Type: forward
+              StatusCode: HTTP_301      # 301 = permanent redirect
+          - Type: forward               # FALSE branch (demo): pass the request to the target group
             TargetGroupArn: !Ref TargetGroup
 
+  # HTTPS:443 listener - only created when a certificate was supplied.
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: HasCertificate
+    Condition: HasCertificate           # skip this whole resource if there's no cert
     Properties:
       LoadBalancerArn: !Ref LoadBalancer
       Port: 443
       Protocol: HTTPS
-      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06  # which TLS versions/ciphers to allow
       Certificates:
-        - CertificateArn: !Ref CertificateArn
+        - CertificateArn: !Ref CertificateArn         # the TLS certificate to present
       DefaultActions:
-        - Type: forward
+        - Type: forward                 # decrypt, then forward to the tasks
           TargetGroupArn: !Ref TargetGroup
 
   # ----- Logging (parity naming; improvement: retention) -----
+  # A CloudWatch log group is where the container's console output is collected.
   LogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Delete
+    DeletionPolicy: Delete              # when the stack is deleted, delete these logs too (no orphans)
     UpdateReplacePolicy: Delete
     Properties:
-      LogGroupName: !Sub '/ecs/${ServiceName}-${Environment}-task'
-      RetentionInDays: !Ref LogRetentionDays
+      LogGroupName: !Sub '/ecs/${ServiceName}-${Environment}-task'  # matches BeED's /ecs/... naming
+      RetentionInDays: !Ref LogRetentionDays          # auto-delete logs after N days (cost control)
 
   # ----- IAM (improvement: per-service roles, execution vs task split) -----
+  # An IAM role is a set of permissions. The EXECUTION role is used by ECS itself
+  # to start the task (pull the image, read the env file, write logs).
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub '${ServiceName}-${Environment}-execution-role'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+      AssumeRolePolicyDocument:         # WHO is allowed to use this role...
+        Version: '2012-10-17'           # IAM policy language version (fixed, like the template version)
         Statement:
           - Effect: Allow
             Principal:
-              Service: ecs-tasks.amazonaws.com
+              Service: ecs-tasks.amazonaws.com   # ...the ECS tasks service
             Action: sts:AssumeRole
       ManagedPolicyArns:
+        # AWS's ready-made policy that grants the standard "start a task" permissions.
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-      Policies: !If
+      Policies: !If                     # add an extra permission ONLY if there's an env file
         - HasEnvFile
         - - PolicyName: !Sub 'ecs-${ServiceName}-read-appsetting-policy'
             PolicyDocument:
               Version: '2012-10-17'
               Statement:
                 - Effect: Allow
-                  Action: s3:GetObject
-                  Resource: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}/${EnvFileS3Key}'
+                  Action: s3:GetObject              # allow reading...
+                  Resource: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}/${EnvFileS3Key}'  # ...ONLY this one env file
                 - Effect: Allow
                   Action: s3:GetBucketLocation
                   Resource: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}'
-        - !Ref AWS::NoValue
+        - !Ref AWS::NoValue             # "AWS::NoValue" means: add nothing here
 
+  # The TASK role is used by YOUR app code at runtime (e.g. to call other AWS
+  # services). Kept separate and empty by default = least privilege / good hygiene.
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -232,77 +267,85 @@ Resources:
             Action: sts:AssumeRole
 
   # ----- Task definition (parity with observed Hub-API-prod-task) -----
+  # A task definition is the "recipe" for a container: which image, how much
+  # CPU/RAM, which ports, which env file, where logs go, which roles to use.
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub '${ServiceName}-${Environment}-task'
+      Family: !Sub '${ServiceName}-${Environment}-task'  # the recipe's name (revisions stack under it)
       RequiresCompatibilities: [FARGATE]
-      NetworkMode: awsvpc
+      NetworkMode: awsvpc               # each task gets its own network interface + IP (required for Fargate)
       Cpu: !Ref Cpu
       Memory: !Ref Memory
       RuntimePlatform:
-        CpuArchitecture: X86_64
+        CpuArchitecture: X86_64         # normal Intel/AMD (not ARM) - matches BeED's build
         OperatingSystemFamily: LINUX
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn  # !GetAtt reads an attribute (here the role's ARN/ID)
       TaskRoleArn: !GetAtt TaskRole.Arn
-      ContainerDefinitions:
+      ContainerDefinitions:             # the list of containers in the task (here, just one)
         - Name: !Sub '${ServiceName}-${Environment}'
-          Image: !Ref ImageUri
-          Essential: true
+          Image: !Ref ImageUri          # which Docker image to run
+          Essential: true               # if this container dies, the whole task is considered failed
           PortMappings:
             - ContainerPort: !Ref ContainerPort
               Protocol: tcp
               AppProtocol: http
               Name: !Sub '${ServiceName}-${Environment}-${ContainerPort}-tcp'
-          EnvironmentFiles: !If
+          EnvironmentFiles: !If         # attach the S3 env file, only if one was provided
             - HasEnvFile
             - - Type: s3
                 Value: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}/${EnvFileS3Key}'
             - !Ref AWS::NoValue
           LogConfiguration:
-            LogDriver: awslogs
+            LogDriver: awslogs          # send container stdout/stderr to CloudWatch
             Options:
-              awslogs-group: !Ref LogGroup
-              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup          # into the log group created above
+              awslogs-region: !Ref AWS::Region      # AWS::Region = the region you're deploying to
               awslogs-stream-prefix: ecs
 
   # ----- Service (improvement: circuit breaker with auto-rollback) -----
+  # A service keeps the desired number of tasks running (restarts them if they
+  # crash) and connects them to the load balancer.
   Service:
     Type: AWS::ECS::Service
-    DependsOn: HttpListener
+    DependsOn: HttpListener             # wait until the listener exists before creating the service
     Properties:
       ServiceName: !Sub '${ServiceName}-${Environment}-service'
       Cluster: !Ref Cluster
-      TaskDefinition: !Ref TaskDefinition
+      TaskDefinition: !Ref TaskDefinition   # which recipe to run
       LaunchType: FARGATE
       PlatformVersion: 1.4.0
-      SchedulingStrategy: REPLICA
+      SchedulingStrategy: REPLICA       # run N identical copies (as opposed to one-per-host)
       DesiredCount: !Ref DesiredCount
       HealthCheckGracePeriodSeconds: !Ref HealthCheckGracePeriodSeconds
       DeploymentConfiguration:
-        MinimumHealthyPercent: 100
-        MaximumPercent: 200
+        MinimumHealthyPercent: 100      # during a deploy, never drop below 100% capacity
+        MaximumPercent: 200             # may temporarily run up to 200% (old + new tasks)
         DeploymentCircuitBreaker:
-          Enable: true
-          Rollback: true
+          Enable: true                  # watch new deploys...
+          Rollback: true                # ...and auto-revert to the last good version if they fail
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: ENABLED   # parity - default VPC has no NAT, tasks need internet for ECR/S3
+          AssignPublicIp: ENABLED       # parity - default VPC has no NAT, so tasks need a public IP for internet
           Subnets: !Ref SubnetIds
           SecurityGroups:
-            - !Ref TaskSecurityGroup
-      LoadBalancers:
+            - !Ref TaskSecurityGroup    # attach the locked-down task firewall
+      LoadBalancers:                    # connect this service's container to the target group
         - ContainerName: !Sub '${ServiceName}-${Environment}'
           ContainerPort: !Ref ContainerPort
           TargetGroupArn: !Ref TargetGroup
 
+# ---------------------------------------------------------------------------
+# OUTPUTS = values printed after the deploy finishes (also shown in the console).
+# Handy for the next step - e.g. the ALB DNS name you point your CNAME at.
+# ---------------------------------------------------------------------------
 Outputs:
   AlbDnsName:
     Description: ALB DNS name - create the external beed.world CNAME pointing here
     Value: !GetAtt LoadBalancer.DNSName
   ServiceUrl:
     Description: URL to reach the service
-    Value: !If
+    Value: !If                          # show https:// if there's a cert, else http://
       - HasCertificate
       - !Sub 'https://${LoadBalancer.DNSName}'
       - !Sub 'http://${LoadBalancer.DNSName}'

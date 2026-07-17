@@ -26,7 +26,7 @@ option-b-redesign/
   service-stack.yaml          # PER service: TG, listener rule, service, autoscaling
   params/...
 scripts/
-  deploy.sh | deploy.ps1      # thin wrappers: template + stack name + params file
+  deploy.sh                   # thin wrapper: template + stack name + params file
 ```
 
 ---
@@ -103,8 +103,9 @@ one service can move at a time.
 ## Demo script
 
 Prereqs: AWS CLI v2 with credentials for the demo account, region
-`ap-southeast-1`. All demo params use tiny public images and small task sizes;
-cost while the stacks are up is a few cents/hour.
+`ap-southeast-1`, and a Bash shell (Linux/macOS, or Git Bash / WSL on Windows).
+All demo params use tiny public images and small task sizes; cost while the
+stacks are up is a few cents/hour.
 
 ### Option A (~4 minutes to a working service)
 

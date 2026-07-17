@@ -1,4 +1,6 @@
+# Template format version (fixed date defined by AWS, not today's date).
 AWSTemplateFormatVersion: '2010-09-09'
+
 Description: >-
   BeED per-service stack (Option B - best-practice redesign). Deploy once PER
   SERVICE onto an existing platform stack. Provisions: target group, host-based
@@ -7,31 +9,34 @@ Description: >-
   service in private subnets with target-tracking autoscaling. Adds zero
   fixed-cost infrastructure per service.
 
+# ---------------------------------------------------------------------------
+# PARAMETERS = the blanks you fill in per service (see params/demo-service-dev.json).
+# ---------------------------------------------------------------------------
 Parameters:
-  PlatformStackName:
+  PlatformStackName:                    # the name of the platform stack to plug into
     Type: String
     Description: Name of the deployed platform stack to attach to (cross-stack imports)
-  ServiceName:
+  ServiceName:                          # e.g. "hub-api"
     Type: String
     AllowedPattern: '[a-z][a-z0-9-]*'
     MaxLength: 20
     Description: Short service name, lowercase (e.g. hub-api)
-  Environment:
+  Environment:                          # must match the platform's environment
     Type: String
     AllowedValues: [test, stage, prod]
     Description: Target environment (must match the platform stack's)
-  HostHeader:
+  HostHeader:                           # the web address that routes to THIS service
     Type: String
     Description: Host name routed to this service (e.g. hub-api-prod.beed.world)
-  ListenerRulePriority:
+  ListenerRulePriority:                 # each rule on the shared listener needs a unique number
     Type: Number
     MinValue: 1
     MaxValue: 50000
     Description: Unique priority for this service's rule on the shared listener
-  ContainerPort:
+  ContainerPort:                        # the port the app listens on
     Type: Number
     Description: Port the container listens on
-  ImageUri:
+  ImageUri:                             # which Docker image to run
     Type: String
     Description: Full container image URI incl. tag
   Cpu:
@@ -41,22 +46,22 @@ Parameters:
   Memory:
     Type: String
     Default: '1024'
-  MinTasks:
+  MinTasks:                             # smallest number of running copies (autoscaling floor)
     Type: Number
-    Default: 2
+    Default: 2                          # 2 = one in each zone = high availability
     Description: Autoscaling floor (2 = HA across both AZs; use 1 for cheap demo)
-  MaxTasks:
+  MaxTasks:                             # largest number of copies autoscaling may grow to
     Type: Number
     Default: 4
     Description: Autoscaling ceiling
-  CpuTargetPercent:
+  CpuTargetPercent:                     # scale out when average CPU passes this %
     Type: Number
     Default: 70
     Description: Target-tracking CPU utilisation percent
   HealthCheckPath:
     Type: String
     Default: /health
-  SecretsManagerArn:
+  SecretsManagerArn:                    # a secret holding the app's config (optional)
     Type: String
     Default: ''
     Description: >-
@@ -67,18 +72,23 @@ Parameters:
     Default: 30
     AllowedValues: [7, 14, 30, 60, 90, 180, 365]
 
+# ---------------------------------------------------------------------------
+# CONDITIONS
+# ---------------------------------------------------------------------------
 Conditions:
-  HasSecret: !Not [!Equals [!Ref SecretsManagerArn, '']]
+  HasSecret: !Not [!Equals [!Ref SecretsManagerArn, '']]   # true if a secret was supplied
 
 Resources:
   # ----- Routing on the shared ALB -----
+  # This service's own target group (its list of tasks + health-check rules).
+  # !ImportValue pulls a value that the PLATFORM stack exported (its VPC id, etc.).
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       Name: !Sub 'beed-${ServiceName}-${Environment}-tg'
-      VpcId: !ImportValue
+      VpcId: !ImportValue                       # import the platform's VPC id
         Fn::Sub: '${PlatformStackName}-VpcId'
-      TargetType: ip
+      TargetType: ip                            # Fargate tasks register by IP
       Protocol: HTTP
       Port: !Ref ContainerPort
       HealthCheckProtocol: HTTP
@@ -91,17 +101,20 @@ Resources:
       Matcher:
         HttpCode: '200'
 
+  # The rule that makes the SHARED ALB route this service's traffic:
+  # "if the request's Host header = HostHeader, forward to this target group."
+  # This is what lets many services share one load balancer.
   ListenerRule:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
-      ListenerArn: !ImportValue
+      ListenerArn: !ImportValue                 # attach to the platform's shared listener
         Fn::Sub: '${PlatformStackName}-RulesListenerArn'
-      Priority: !Ref ListenerRulePriority
+      Priority: !Ref ListenerRulePriority       # rules are evaluated in priority order; must be unique
       Conditions:
         - Field: host-header
           HostHeaderConfig:
             Values:
-              - !Ref HostHeader
+              - !Ref HostHeader                 # e.g. hub-api-prod.beed.world
       Actions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
@@ -118,25 +131,26 @@ Resources:
         - IpProtocol: tcp
           FromPort: !Ref ContainerPort
           ToPort: !Ref ContainerPort
-          SourceSecurityGroupId: !ImportValue
+          SourceSecurityGroupId: !ImportValue   # allow ONLY the shared ALB's security group
             Fn::Sub: '${PlatformStackName}-AlbSecurityGroupId'
           Description: Container port from shared ALB only
 
   # ----- Logging -----
   LogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Delete
+    DeletionPolicy: Delete                      # delete logs when the stack is deleted (no orphans)
     UpdateReplacePolicy: Delete
     Properties:
       LogGroupName: !Sub '/ecs/beed-${ServiceName}-${Environment}'
       RetentionInDays: !Ref LogRetentionDays
 
   # ----- Per-service IAM: execution (infra) vs task (app) split -----
+  # Execution role: used by ECS to start the task (pull image, read secret, write logs).
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub 'beed-${ServiceName}-${Environment}-execution-role'
-      AssumeRolePolicyDocument:
+      AssumeRolePolicyDocument:                 # who may assume this role: the ECS tasks service
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
@@ -145,7 +159,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-      Policies: !If
+      Policies: !If                             # add secret-read permission ONLY if a secret was given
         - HasSecret
         - - PolicyName: read-own-secret
             PolicyDocument:
@@ -153,9 +167,10 @@ Resources:
               Statement:
                 - Effect: Allow
                   Action: secretsmanager:GetSecretValue
-                  Resource: !Ref SecretsManagerArn
+                  Resource: !Ref SecretsManagerArn   # ...limited to THIS service's secret only
         - !Ref AWS::NoValue
 
+  # Task role: used by the app's own code at runtime. Empty by default (least privilege).
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -168,7 +183,7 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
 
-  # ----- Task definition -----
+  # ----- Task definition (the container "recipe") -----
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -190,9 +205,9 @@ Resources:
             - ContainerPort: !Ref ContainerPort
               Protocol: tcp
               AppProtocol: http
-          Secrets: !If
+          Secrets: !If                          # inject the secret as an env var, only if provided
             - HasSecret
-            - - Name: APP_CONFIG
+            - - Name: APP_CONFIG                 # the app reads process.env.APP_CONFIG
                 ValueFrom: !Ref SecretsManagerArn
             - !Ref AWS::NoValue
           LogConfiguration:
@@ -205,27 +220,27 @@ Resources:
   # ----- Service: private subnets, no public IP, circuit breaker -----
   Service:
     Type: AWS::ECS::Service
-    DependsOn: ListenerRule
+    DependsOn: ListenerRule                      # wait until the routing rule exists
     Properties:
       ServiceName: !Sub 'beed-${ServiceName}-${Environment}'
-      Cluster: !ImportValue
+      Cluster: !ImportValue                      # run on the platform's shared cluster
         Fn::Sub: '${PlatformStackName}-ClusterName'
       TaskDefinition: !Ref TaskDefinition
       LaunchType: FARGATE
       PlatformVersion: 1.4.0
       SchedulingStrategy: REPLICA
-      DesiredCount: !Ref MinTasks
+      DesiredCount: !Ref MinTasks                # start with the minimum; autoscaling adjusts from here
       HealthCheckGracePeriodSeconds: 30
       DeploymentConfiguration:
         MinimumHealthyPercent: 100
         MaximumPercent: 200
         DeploymentCircuitBreaker:
           Enable: true
-          Rollback: true
+          Rollback: true                         # auto-revert a failed deploy
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: DISABLED   # tasks are unreachable from the internet; egress via NAT
-          Subnets: !Split
+          AssignPublicIp: DISABLED               # NO public IP - tasks are private; egress via NAT
+          Subnets: !Split                        # !Split turns the imported "id1,id2" string back into a list
             - ','
             - !ImportValue
               Fn::Sub: '${PlatformStackName}-PrivateSubnetIds'
@@ -237,18 +252,21 @@ Resources:
           TargetGroupArn: !Ref TargetGroup
 
   # ----- Autoscaling: target tracking on CPU -----
+  # The "scalable target" tells AWS which thing can scale and its min/max size.
   ScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Properties:
       ServiceNamespace: ecs
-      ScalableDimension: ecs:service:DesiredCount
-      ResourceId: !Sub
+      ScalableDimension: ecs:service:DesiredCount   # the number we adjust = the service's task count
+      ResourceId: !Sub                              # identifies the exact service, format: service/<cluster>/<service>
         - 'service/${ClusterName}/${Service.Name}'
         - ClusterName: !ImportValue
             Fn::Sub: '${PlatformStackName}-ClusterName'
       MinCapacity: !Ref MinTasks
       MaxCapacity: !Ref MaxTasks
 
+  # The "scaling policy" is the rule: keep average CPU near the target %,
+  # adding tasks when busy and removing them when idle.
   ScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Properties:
@@ -257,11 +275,14 @@ Resources:
       ScalingTargetId: !Ref ScalableTarget
       TargetTrackingScalingPolicyConfiguration:
         PredefinedMetricSpecification:
-          PredefinedMetricType: ECSServiceAverageCPUUtilization
-        TargetValue: !Ref CpuTargetPercent
-        ScaleInCooldown: 300
-        ScaleOutCooldown: 60
+          PredefinedMetricType: ECSServiceAverageCPUUtilization   # watch the service's average CPU
+        TargetValue: !Ref CpuTargetPercent        # aim to keep it around this % (e.g. 70)
+        ScaleInCooldown: 300                       # wait 5 min between scale-DOWN steps (avoid flapping)
+        ScaleOutCooldown: 60                       # wait 1 min between scale-UP steps (react faster)
 
+# ---------------------------------------------------------------------------
+# OUTPUTS = handy values printed after deploy.
+# ---------------------------------------------------------------------------
 Outputs:
   ServiceHostName:
     Description: Create the external beed.world CNAME - this host -> the shared ALB DNS

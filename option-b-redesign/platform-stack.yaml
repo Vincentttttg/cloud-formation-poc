@@ -1,4 +1,6 @@
+# Template format version (fixed date defined by AWS, not today's date).
 AWSTemplateFormatVersion: '2010-09-09'
+
 Description: >-
   BeED shared platform stack (Option B - best-practice redesign). Deploy ONCE per
   environment. Provisions: purpose-built VPC (public subnets for the ALB, private
@@ -6,23 +8,26 @@ Description: >-
   ONE shared ECS cluster. Service stacks attach to this via cross-stack exports;
   each new backend service then adds zero fixed-cost infrastructure.
 
+# ---------------------------------------------------------------------------
+# PARAMETERS = the blanks you fill in when deploying (see params/platform-demo.json).
+# ---------------------------------------------------------------------------
 Parameters:
-  EnvironmentName:
+  EnvironmentName:                      # which environment this shared platform serves
     Type: String
     AllowedValues: [test, stage, prod]
     Description: Environment this platform serves
-  VpcCidr:
+  VpcCidr:                              # the private IP range for the whole VPC
     Type: String
-    Default: 10.0.0.0/16
+    Default: 10.0.0.0/16                # /16 = ~65,000 addresses, split into subnets below
     Description: CIDR for the platform VPC
-  CertificateArn:
+  CertificateArn:                       # the HTTPS certificate for the shared ALB (optional)
     Type: String
     Default: ''
     Description: >-
       Optional ACM certificate (e.g. *.beed.world wildcard). When set, HTTPS:443
       terminates TLS and HTTP:80 redirects; service listener rules attach to the
       HTTPS listener. When empty (demo mode), rules attach to HTTP:80.
-  NatPerAz:
+  NatPerAz:                             # one NAT gateway per zone (HA) or a single shared one (cheaper)?
     Type: String
     Default: 'false'
     AllowedValues: ['true', 'false']
@@ -30,22 +35,27 @@ Parameters:
       true = one NAT gateway per AZ (HA, ~2x NAT cost). false = single shared NAT
       (cheaper; an AZ outage of that AZ breaks outbound from the other).
 
+# ---------------------------------------------------------------------------
+# CONDITIONS = reusable true/false tests.
+# ---------------------------------------------------------------------------
 Conditions:
-  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
-  CreateSecondNat: !Equals [!Ref NatPerAz, 'true']
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]   # true if a cert was supplied
+  CreateSecondNat: !Equals [!Ref NatPerAz, 'true']           # true if we want a 2nd NAT gateway
 
 Resources:
   # ----- VPC -----
+  # A VPC is your own private, isolated network inside AWS.
   Vpc:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: !Ref VpcCidr
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
+      EnableDnsSupport: true            # let resources resolve DNS names
+      EnableDnsHostnames: true          # give resources internal DNS names
       Tags:
-        - Key: Name
+        - Key: Name                     # a friendly label shown in the console
           Value: !Sub 'beed-${EnvironmentName}-vpc'
 
+  # The internet gateway is the VPC's connection to the public internet.
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
@@ -53,40 +63,46 @@ Resources:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-igw'
 
+  # Attaching the gateway actually plugs it into the VPC.
   VpcGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref Vpc
       InternetGatewayId: !Ref InternetGateway
 
+  # PUBLIC subnets = have a route to the internet gateway. The ALB lives here.
+  # !Cidr [range, count, bits] auto-slices the VPC range into smaller subnets so
+  # you don't have to calculate IP ranges by hand. !Select [0, ...] picks the 1st.
   PublicSubnetA:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
-      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 12]]
-      AvailabilityZone: !Select [0, !GetAZs '']
-      MapPublicIpOnLaunch: true
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 12]]  # 1st of 4 sub-ranges
+      AvailabilityZone: !Select [0, !GetAZs '']            # 1st availability zone in this region
+      MapPublicIpOnLaunch: true         # things launched here get a public IP
       Tags:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-public-a'
 
-  PublicSubnetB:
+  PublicSubnetB:                        # a 2nd public subnet in a 2nd zone (for redundancy)
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
-      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 12]]
-      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 12]]  # 2nd sub-range
+      AvailabilityZone: !Select [1, !GetAZs '']            # 2nd zone
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-public-b'
 
+  # PRIVATE subnets = NO direct internet route. The tasks (containers) live here,
+  # so nobody on the internet can reach them directly. This is the security win.
   PrivateSubnetA:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
-      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 12]]
-      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 12]]  # 3rd sub-range
+      AvailabilityZone: !Select [0, !GetAZs '']            # same zone as PublicSubnetA
       Tags:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-private-a'
@@ -95,12 +111,13 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
-      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 12]]
-      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 12]]  # 4th sub-range
+      AvailabilityZone: !Select [1, !GetAZs '']            # same zone as PublicSubnetB
       Tags:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-private-b'
 
+  # A route table is a set of "to reach X, go via Y" rules for a subnet.
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -109,14 +126,16 @@ Resources:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-public-rt'
 
+  # Rule for public subnets: "to reach anywhere (0.0.0.0/0), use the internet gateway."
   PublicDefaultRoute:
     Type: AWS::EC2::Route
-    DependsOn: VpcGatewayAttachment
+    DependsOn: VpcGatewayAttachment     # the gateway must be attached first
     Properties:
       RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
+      DestinationCidrBlock: 0.0.0.0/0   # "any destination"
       GatewayId: !Ref InternetGateway
 
+  # Attach the public route table to each public subnet.
   PublicSubnetARouteAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -129,21 +148,25 @@ Resources:
       SubnetId: !Ref PublicSubnetB
       RouteTableId: !Ref PublicRouteTable
 
+  # An Elastic IP is a fixed public IP address, needed by the NAT gateway.
   NatEipA:
     Type: AWS::EC2::EIP
     DependsOn: VpcGatewayAttachment
     Properties:
       Domain: vpc
 
+  # A NAT gateway lets the PRIVATE tasks reach OUT to the internet (e.g. pull a
+  # Docker image) while still blocking anyone from reaching IN to them.
   NatGatewayA:
     Type: AWS::EC2::NatGateway
     Properties:
-      AllocationId: !GetAtt NatEipA.AllocationId
-      SubnetId: !Ref PublicSubnetA
+      AllocationId: !GetAtt NatEipA.AllocationId  # use the Elastic IP above
+      SubnetId: !Ref PublicSubnetA      # a NAT gateway itself sits in a PUBLIC subnet
       Tags:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-nat-a'
 
+  # A second Elastic IP + NAT, created ONLY if NatPerAz=true (full HA).
   NatEipB:
     Type: AWS::EC2::EIP
     Condition: CreateSecondNat
@@ -161,6 +184,7 @@ Resources:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-nat-b'
 
+  # Route table for private subnet A.
   PrivateRouteTableA:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -169,6 +193,7 @@ Resources:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-private-rt-a'
 
+  # Rule for private subnet A: "to reach the internet, go via NAT gateway A."
   PrivateDefaultRouteA:
     Type: AWS::EC2::Route
     Properties:
@@ -182,6 +207,7 @@ Resources:
       SubnetId: !Ref PrivateSubnetA
       RouteTableId: !Ref PrivateRouteTableA
 
+  # Route table for private subnet B.
   PrivateRouteTableB:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -190,6 +216,7 @@ Resources:
         - Key: Name
           Value: !Sub 'beed-${EnvironmentName}-private-rt-b'
 
+  # Rule for private subnet B: use NAT B if it exists, otherwise share NAT A.
   PrivateDefaultRouteB:
     Type: AWS::EC2::Route
     Properties:
@@ -204,6 +231,7 @@ Resources:
       RouteTableId: !Ref PrivateRouteTableB
 
   # ----- Shared ALB -----
+  # One firewall for the single shared load balancer: open to the internet on 80/443.
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -222,6 +250,7 @@ Resources:
           CidrIp: 0.0.0.0/0
           Description: Public HTTPS
 
+  # ONE load balancer shared by every service (instead of one per service).
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -229,13 +258,14 @@ Resources:
       Type: application
       Scheme: internet-facing
       IpAddressType: ipv4
-      Subnets:
+      Subnets:                          # the ALB spans both public subnets (2 zones)
         - !Ref PublicSubnetA
         - !Ref PublicSubnetB
       SecurityGroups:
         - !Ref AlbSecurityGroup
 
-  # Default action returns 404 - every service adds its own host-based rule.
+  # The shared listener's DEFAULT action returns 404. Each service will later add
+  # its own rule ("if host = hub-api-prod.beed.world, send to hub-api's tasks").
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -245,7 +275,7 @@ Resources:
       DefaultActions:
         - !If
           - HasCertificate
-          - Type: redirect
+          - Type: redirect              # with a cert: push everyone to HTTPS
             RedirectConfig:
               Protocol: HTTPS
               Port: '443'
@@ -253,12 +283,13 @@ Resources:
               Path: '/#{path}'
               Query: '#{query}'
               StatusCode: HTTP_301
-          - Type: fixed-response
+          - Type: fixed-response        # demo mode: reply 404 unless a service rule matches
             FixedResponseConfig:
               StatusCode: '404'
               ContentType: text/plain
               MessageBody: No service matches this host name.
 
+  # HTTPS listener - only when a certificate was provided. Service rules attach here.
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Condition: HasCertificate
@@ -287,16 +318,21 @@ Resources:
           Weight: 1
       ClusterSettings:
         - Name: containerInsights
-          Value: enabled
+          Value: enabled                # turn on extra CPU/memory monitoring for the cluster
 
+# ---------------------------------------------------------------------------
+# OUTPUTS with EXPORT = values PUBLISHED account-wide so the separate per-service
+# stacks can import them (that is how a service stack "plugs into" this platform).
+# Each Export name must be unique across the account.
+# ---------------------------------------------------------------------------
 Outputs:
   VpcId:
     Value: !Ref Vpc
     Export:
-      Name: !Sub '${AWS::StackName}-VpcId'
+      Name: !Sub '${AWS::StackName}-VpcId'          # AWS::StackName = the name you gave this stack
   PrivateSubnetIds:
     Description: Private subnets where services run
-    Value: !Join [',', [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
+    Value: !Join [',', [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]  # !Join glues the two IDs with a comma
     Export:
       Name: !Sub '${AWS::StackName}-PrivateSubnetIds'
   PublicSubnetIds:
