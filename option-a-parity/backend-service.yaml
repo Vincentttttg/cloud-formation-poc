@@ -1,0 +1,318 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  BeED backend service stack (Option A - parity with current manual provisioning,
+  plus safe improvements). Provisions: ECS cluster, dedicated ALB, target group,
+  HTTP/HTTPS listeners, security groups, CloudWatch log group, per-service IAM
+  roles, Fargate task definition and service. Replaces ~12 manual console steps
+  with one deploy command.
+
+Parameters:
+  ServiceName:
+    Type: String
+    Description: Short service name, lowercase (e.g. hub-api)
+    AllowedPattern: '[a-z][a-z0-9-]*'
+    MaxLength: 20
+  Environment:
+    Type: String
+    AllowedValues: [test, stage, prod]
+    Description: Target environment
+  ContainerPort:
+    Type: Number
+    Description: Port the container listens on (e.g. 4100)
+  ImageUri:
+    Type: String
+    Description: Full container image URI incl. tag (ECR or public registry)
+  Cpu:
+    Type: String
+    Default: '1024'
+    AllowedValues: ['256', '512', '1024', '2048', '4096']
+    Description: Fargate task CPU units (1024 = 1 vCPU; matches current prod default)
+  Memory:
+    Type: String
+    Default: '3072'
+    Description: Fargate task memory in MiB (matches current prod default)
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: Number of tasks (current prod runs 1)
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy into (prod uses the default VPC vpc-df22d8bb)
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for ALB and tasks (parity - no NAT exists in the default VPC)
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional ACM certificate ARN (e.g. the *.beed.world wildcard). When empty,
+      the HTTPS listener is skipped and HTTP forwards directly (demo mode).
+  HealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Target group health check path (current standard is /health)
+  EnvFileS3Bucket:
+    Type: String
+    Default: ''
+    Description: Optional S3 bucket holding the service .env file (current pattern - acdstagingbucket)
+  EnvFileS3Key:
+    Type: String
+    Default: ''
+    Description: Optional S3 key of the .env file (e.g. setting-hubapi/hubapi-prod.env)
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 60, 90, 180, 365]
+    Description: CloudWatch log retention (improvement - current groups never expire)
+  HealthCheckGracePeriodSeconds:
+    Type: Number
+    Default: 0
+    Description: Grace period before ALB health checks count (current setting is 0)
+
+Conditions:
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+  HasEnvFile: !Not [!Equals [!Ref EnvFileS3Bucket, '']]
+
+Resources:
+  # ----- Cluster (parity: one cluster per service per environment) -----
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ServiceName}-cluster-${Environment}'
+      CapacityProviders: [FARGATE]
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+  # ----- Security groups (improvement: scoped chain instead of default SG) -----
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'ALB for ${ServiceName}-${Environment} - public HTTP/HTTPS'
+      GroupName: !Sub 'beed-${ServiceName}-${Environment}-alb-sg'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTPS
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Tasks for ${ServiceName}-${Environment} - only reachable from its ALB'
+      GroupName: !Sub 'beed-${ServiceName}-${Environment}-task-sg'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: Container port from ALB only
+
+  # ----- Load balancer (parity: dedicated ALB per service) -----
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub 'BeED-${ServiceName}-${Environment}'
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub 'BeED-${ServiceName}-${Environment}-tg'
+      VpcId: !Ref VpcId
+      TargetType: ip
+      Protocol: HTTP
+      Port: !Ref ContainerPort
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+
+  # HTTP:80 - redirects to HTTPS when a certificate is supplied (parity),
+  # otherwise forwards directly so the stack works without a certificate (demo mode).
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - HasCertificate
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: '443'
+              Host: '#{host}'
+              Path: '/#{path}'
+              Query: '#{query}'
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref TargetGroup
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ----- Logging (parity naming; improvement: retention) -----
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/ecs/${ServiceName}-${Environment}-task'
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ----- IAM (improvement: per-service roles, execution vs task split) -----
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ServiceName}-${Environment}-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies: !If
+        - HasEnvFile
+        - - PolicyName: !Sub 'ecs-${ServiceName}-read-appsetting-policy'
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: s3:GetObject
+                  Resource: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}/${EnvFileS3Key}'
+                - Effect: Allow
+                  Action: s3:GetBucketLocation
+                  Resource: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}'
+        - !Ref AWS::NoValue
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ServiceName}-${Environment}-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  # ----- Task definition (parity with observed Hub-API-prod-task) -----
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ServiceName}-${Environment}-task'
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref Cpu
+      Memory: !Ref Memory
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub '${ServiceName}-${Environment}'
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+              AppProtocol: http
+              Name: !Sub '${ServiceName}-${Environment}-${ContainerPort}-tcp'
+          EnvironmentFiles: !If
+            - HasEnvFile
+            - - Type: s3
+                Value: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}/${EnvFileS3Key}'
+            - !Ref AWS::NoValue
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # ----- Service (improvement: circuit breaker with auto-rollback) -----
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: HttpListener
+    Properties:
+      ServiceName: !Sub '${ServiceName}-${Environment}-service'
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: 1.4.0
+      SchedulingStrategy: REPLICA
+      DesiredCount: !Ref DesiredCount
+      HealthCheckGracePeriodSeconds: !Ref HealthCheckGracePeriodSeconds
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED   # parity - default VPC has no NAT, tasks need internet for ECR/S3
+          Subnets: !Ref SubnetIds
+          SecurityGroups:
+            - !Ref TaskSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Sub '${ServiceName}-${Environment}'
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  AlbDnsName:
+    Description: ALB DNS name - create the external beed.world CNAME pointing here
+    Value: !GetAtt LoadBalancer.DNSName
+  ServiceUrl:
+    Description: URL to reach the service
+    Value: !If
+      - HasCertificate
+      - !Sub 'https://${LoadBalancer.DNSName}'
+      - !Sub 'http://${LoadBalancer.DNSName}'
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name
+  TargetGroupArn:
+    Value: !Ref TargetGroup
+  LogGroupName:
+    Value: !Ref LogGroup
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition

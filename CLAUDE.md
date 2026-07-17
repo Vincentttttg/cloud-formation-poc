@@ -43,6 +43,8 @@ Known BeED services: hub-api, gatekeeper, connect, experio-api, unified-library,
    11. Wait for deployment and verify the target turns Healthy in the target group.
    12. Create the DNS CNAME (`<svc>.beed.world` → ALB DNS name) in the external DNS provider.
    And this whole sequence is repeated **per environment** (test / stage / prod), so a fully rolled-out service ≈ 36 manual steps.
+
+   *Provenance: this list is reconstructed from observed AWS resources (each per-service resource implies its creation step; ECS service/task def show `Created by: user/Sandy`), the task definition's ECR/S3 references, and the wiki's B-09 health verification step. It is NOT a documented runbook — BEED-DEPL-001 only covers recurring deployments, not first-time provisioning (a gap in itself). Ordering is assumed by dependency; validate the exact flow with Sandy.*
 2. Naming typos/inconsistency (`Target-Goup`, `greenligt`) → templated names.
 3. Wide-open default SG + public task IPs → scoped SG chain.
 4. Shared execution role near policy limit → per-service roles.

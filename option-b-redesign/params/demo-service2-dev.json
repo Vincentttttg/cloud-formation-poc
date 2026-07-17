@@ -1,0 +1,15 @@
+[
+  "PlatformStackName=beed-platform-test",
+  "ServiceName=demo-api2",
+  "Environment=test",
+  "HostHeader=demo-api2-test.beed.world",
+  "ListenerRulePriority=20",
+  "ContainerPort=80",
+  "ImageUri=public.ecr.aws/docker/library/httpd:alpine",
+  "Cpu=256",
+  "Memory=512",
+  "MinTasks=1",
+  "MaxTasks=2",
+  "HealthCheckPath=/",
+  "LogRetentionDays=7"
+]

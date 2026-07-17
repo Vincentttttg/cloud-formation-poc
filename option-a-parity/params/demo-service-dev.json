@@ -1,0 +1,13 @@
+[
+  "ServiceName=demo-api",
+  "Environment=test",
+  "ContainerPort=80",
+  "ImageUri=public.ecr.aws/docker/library/nginx:alpine",
+  "Cpu=256",
+  "Memory=512",
+  "DesiredCount=1",
+  "VpcId=vpc-07c712dd87ab54541",
+  "SubnetIds=subnet-0a71099444f9e3dd2,subnet-0175d233e8c89b102,subnet-0bc31a2daba3cfe8a",
+  "HealthCheckPath=/",
+  "LogRetentionDays=7"
+]

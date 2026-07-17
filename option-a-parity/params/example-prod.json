@@ -1,0 +1,16 @@
+[
+  "ServiceName=hub-api",
+  "Environment=prod",
+  "ContainerPort=4100",
+  "ImageUri=241486781178.dkr.ecr.ap-southeast-1.amazonaws.com/hub-api-prod-repo:v1.3.46",
+  "Cpu=1024",
+  "Memory=3072",
+  "DesiredCount=1",
+  "VpcId=vpc-df22d8bb",
+  "SubnetIds=subnet-14a58252,subnet-5dcc7539,subnet-0955fd7f",
+  "CertificateArn=arn:aws:acm:ap-southeast-1:241486781178:certificate/REPLACE-WITH-WILDCARD-CERT-ID",
+  "HealthCheckPath=/health",
+  "EnvFileS3Bucket=acdstagingbucket",
+  "EnvFileS3Key=setting-hubapi/hubapi-prod.env",
+  "LogRetentionDays=90"
+]
