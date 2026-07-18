@@ -83,7 +83,7 @@ Resources: cluster, ALB-SG (80/443 from 0.0.0.0/0), Task-SG (ContainerPort from 
 
 Safe improvements over parity — each documented in README with WHY:
 1. **Task SG only accepts traffic from the ALB SG** (today: default SG, all TCP from the whole internet, on tasks with public IPs — anyone can hit port 4100 directly, bypassing TLS/ALB).
-2. **Per-service execution role + separate task role** (today: one role shared by all services is both task & execution role — any container can read every service's settings; and the role is 2 policies away from the 10-policy cap, i.e. the current process breaks in ~2 more services).
+2. **Per-service execution role + separate task role** (today: one shared `ecsTaskExecutionRole` is BOTH task & execution role for every service, and it holds an S3-read policy for every service's settings + the Gatekeeper secrets — so any one container, and its app code, can read every service's config/secrets; one compromise exposes all. It also accrues one inline policy per service, growing into a hard-to-audit object. NOTE: the per-service policies are *inline*, which do NOT count against IAM's 10-*managed*-policy cap — an earlier claim that it "breaks in ~2 more services" was inaccurate; the real issue is blast radius + maintainability, plus an eventual ~10KB inline-policy size ceiling, not an imminent hard cap).
 3. **Log retention parameter** (today: never-expire logs = silent cost growth).
 4. **ECS deployment circuit breaker with auto-rollback** (today: rollback is a manual 6-step runbook, Section 9 of the wiki).
 5. **Deterministic names** (today: console wizard suffixes like `-wu0ns4py` and typos shipped to prod).

@@ -130,9 +130,14 @@ slots into `deploy.sh` and the wiki process unchanged.
    the container port directly, bypassing the ALB and TLS entirely.
 2. **Per-service execution role, and a separate (empty) task role.** Today one
    shared `ecsTaskExecutionRole` is used as both execution *and* task role for
-   every service, so any container can read every other service's settings.
-   That role already carries 8 policies; at 10 the current process physically
-   stops working (IAM cap). Per-service roles remove both problems.
+   every service. Because every container assumes the same role — which carries
+   an S3-read policy for *every* service's settings (plus the Gatekeeper
+   secrets) — any one service's container (and its app code, since it's also the
+   task role) can read *every* service's config and secrets. One compromised
+   service exposes them all. The role also accumulates one inline policy per
+   service, so it keeps growing into an ever-larger, hard-to-audit object.
+   Per-service roles shrink the blast radius to a single service and split
+   "launch the task" (execution) from "what the app may do" (task role).
 3. **Log retention (default 30 days, parameterised).** Current log groups never
    expire — storage cost grows forever, silently.
 4. **ECS deployment circuit breaker with automatic rollback.** Today a bad
