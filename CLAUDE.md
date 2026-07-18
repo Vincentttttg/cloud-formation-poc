@@ -58,13 +58,21 @@ cloud-formation-poc/
 ├── README.md                          # architecture, rationale for A vs B, demo script
 ├── option-a-parity/
 │   ├── backend-service.yaml           # single self-contained template per service
-│   └── params/demo-service-dev.json
+│   └── params/{demo-service-dev.json, demo-service-envfile.json, example-prod.json}
 ├── option-b-redesign/
 │   ├── platform-stack.yaml            # deploy ONCE: VPC, shared ALB, shared cluster
-│   ├── service-stack.yaml             # deploy PER SERVICE: TG, listener rule, service
-│   └── params/{platform-demo.json, demo-service-dev.json}
-└── scripts/{deploy.ps1, deploy.sh}    # thin wrappers over aws cloudformation deploy
+│   ├── service-stack.yaml             # deploy PER SERVICE: TG, listener rule, service (supports S3 env file AND secret)
+│   └── params/{platform-demo.json, demo-service-dev.json, demo-service2-dev.json, demo-service-envfile.json}
+├── env-file/                          # SHARED across both options (DRY): the S3 env-file concern
+│   ├── envfile-bucket.yaml            # S3 bucket for a service's .env settings file
+│   └── sample-service.env             # sample settings file to upload
+└── scripts/                           # all Bash
+    ├── validate.sh                    # validate-template + cfn-lint on all templates
+    ├── deploy.sh                      # deploy wrapper; if params name an env file, optionally upload it / create the bucket (ENV_FILE=, CREATE_BUCKET=1)
+    ├── teardown.sh                    # delete stack; pass params file as 2nd arg to also clean up the env file (removes object, or demo bucket)
+    └── quick-test.sh                  # Option A end-to-end: validate -> deploy -> curl -> teardown
 ```
+Env-file handling lives in `deploy.sh`/`teardown.sh` (script-level mirror of the template `HasEnvFile` condition) and works for BOTH options. The bucket template + sample `.env` are shared in `env-file/`, not duplicated per option.
 
 ### Option A — Parity + safe improvements (`option-a-parity/backend-service.yaml`)
 Mirrors today's topology so it drops straight into Sandy's workflow: dedicated ALB per service, default-VPC public subnets, public task IPs (no NAT exists), S3 env files, same naming scheme (typo-free), same health-check numbers.

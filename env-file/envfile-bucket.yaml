@@ -1,0 +1,33 @@
+# Template format version (fixed date defined by AWS, not today's date).
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  Demo helper for Option A: creates ONE S3 bucket to hold a service's .env
+  settings file. This mirrors BeED's real pattern - app config lives in S3
+  (e.g. s3://acdstagingbucket/setting-hubapi/hubapi-prod.env), not baked into
+  the image. Deploy this FIRST, upload the .env into it, THEN deploy the
+  service (its ECS task downloads the file from here at startup).
+
+Parameters:
+  BucketName:                           # S3 bucket names must be globally unique
+    Type: String
+    Description: Globally-unique bucket name (the demo script derives one from your account id)
+
+Resources:
+  EnvFileBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete              # let "delete stack" remove the bucket (must be empty first)
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Ref BucketName
+      # Block ALL public access - a settings file should never be internet-readable.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  BucketName:
+    Description: Name of the bucket the .env file should be uploaded into
+    Value: !Ref EnvFileBucket

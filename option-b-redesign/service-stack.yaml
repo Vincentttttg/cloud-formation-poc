@@ -66,7 +66,15 @@ Parameters:
     Default: ''
     Description: >-
       Optional Secrets Manager secret ARN. When set, its value is injected as
-      env var APP_CONFIG (replaces the S3 .env pattern - rotation + audit trail).
+      env var APP_CONFIG (the best-practice option - rotation + audit trail).
+  EnvFileS3Bucket:                      # S3 bucket holding a bulk .env settings file (optional)
+    Type: String
+    Default: ''
+    Description: Optional S3 bucket holding the service .env file (BeED's current pattern)
+  EnvFileS3Key:                         # path/name of that .env file inside the bucket (optional)
+    Type: String
+    Default: ''
+    Description: Optional S3 key of the .env file (e.g. setting-demo-api/demo-api-test.env)
   LogRetentionDays:
     Type: Number
     Default: 30
@@ -76,7 +84,8 @@ Parameters:
 # CONDITIONS
 # ---------------------------------------------------------------------------
 Conditions:
-  HasSecret: !Not [!Equals [!Ref SecretsManagerArn, '']]   # true if a secret was supplied
+  HasSecret: !Not [!Equals [!Ref SecretsManagerArn, '']]     # true if a secret was supplied
+  HasEnvFile: !Not [!Equals [!Ref EnvFileS3Bucket, '']]      # true if an S3 env file was supplied
 
 Resources:
   # ----- Routing on the shared ALB -----
@@ -159,16 +168,41 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-      Policies: !If                             # add secret-read permission ONLY if a secret was given
-        - HasSecret
-        - - PolicyName: read-own-secret
-            PolicyDocument:
-              Version: '2012-10-17'
-              Statement:
-                - Effect: Allow
-                  Action: secretsmanager:GetSecretValue
-                  Resource: !Ref SecretsManagerArn   # ...limited to THIS service's secret only
-        - !Ref AWS::NoValue
+
+  # Scoped S3-read permission for the env file - attached to the execution role
+  # ONLY when an env file is used. (Separate resource, not an inline policy, so
+  # the env file and the secret can each be turned on independently.)
+  EnvFileReadPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasEnvFile
+    Properties:
+      PolicyName: !Sub 'ecs-${ServiceName}-read-appsetting-policy'
+      Roles:
+        - !Ref ExecutionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}/${EnvFileS3Key}'   # just this one file
+          - Effect: Allow
+            Action: s3:GetBucketLocation
+            Resource: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}'
+
+  # Scoped secret-read permission - attached ONLY when a secret is used.
+  SecretReadPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasSecret
+    Properties:
+      PolicyName: read-own-secret
+      Roles:
+        - !Ref ExecutionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref SecretsManagerArn       # limited to THIS service's secret only
 
   # Task role: used by the app's own code at runtime. Empty by default (least privilege).
   TaskRole:
@@ -205,6 +239,11 @@ Resources:
             - ContainerPort: !Ref ContainerPort
               Protocol: tcp
               AppProtocol: http
+          EnvironmentFiles: !If                  # load bulk config from the S3 .env, if provided
+            - HasEnvFile
+            - - Type: s3
+                Value: !Sub 'arn:aws:s3:::${EnvFileS3Bucket}/${EnvFileS3Key}'
+            - !Ref AWS::NoValue
           Secrets: !If                          # inject the secret as an env var, only if provided
             - HasSecret
             - - Name: APP_CONFIG                 # the app reads process.env.APP_CONFIG

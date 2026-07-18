@@ -28,6 +28,7 @@ TEMPLATES=(
   "option-a-parity/backend-service.yaml"
   "option-b-redesign/platform-stack.yaml"
   "option-b-redesign/service-stack.yaml"
+  "env-file/envfile-bucket.yaml"
 )
 
 echo "== aws cloudformation validate-template (structure) =="

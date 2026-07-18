@@ -20,15 +20,19 @@ Two options are included, both fully working:
 option-a-parity/
   backend-service.yaml        # everything for one service, one deploy
   params/demo-service-dev.json
+  params/demo-service-envfile.json  # demo params that reference an S3 env file
   params/example-prod.json    # values mirroring the real hub-api prod setup
 option-b-redesign/
   platform-stack.yaml         # ONCE per env: VPC, shared ALB, shared cluster
   service-stack.yaml          # PER service: TG, listener rule, service, autoscaling
   params/...
+env-file/                     # shared across BOTH options (DRY)
+  envfile-bucket.yaml         # S3 bucket for a service's .env settings file
+  sample-service.env          # sample settings file to upload
 scripts/
   validate.sh                 # validate-template + cfn-lint on all templates
-  deploy.sh                   # thin wrapper: template + stack name + params file
-  teardown.sh                 # delete a stack and wait until it's gone
+  deploy.sh                   # thin wrapper (+ optional S3 env-file upload/bucket)
+  teardown.sh                 # delete a stack (+ optional S3 env-file cleanup)
   quick-test.sh               # Option A end-to-end: validate -> deploy -> curl -> teardown
 ```
 
@@ -44,8 +48,8 @@ All Bash (run from Git Bash or WSL on Windows). Defaults target the demo account
 # Deploy any template:
 ./scripts/deploy.sh <template.yaml> <stack-name> <params.json>
 
-# Delete a stack when done:
-./scripts/teardown.sh <stack-name>
+# Delete a stack when done (add the params file if the stack used an env file):
+./scripts/teardown.sh <stack-name> [params.json]
 
 # One-shot smoke test of Option A: validate, deploy, curl the ALB until it
 # returns 200, then tear the stack down automatically:
@@ -53,6 +57,54 @@ All Bash (run from Git Bash or WSL on Windows). Defaults target the demo account
 # ...leave it running afterwards instead of deleting (to poke at it):
 KEEP=1 ./scripts/quick-test.sh
 ```
+
+### The S3 env-file pattern (built into `deploy.sh` / `teardown.sh`)
+
+BeED services load config from an S3 `.env` file rather than baking it into the
+image. `deploy.sh` handles this automatically: **if the params file references an
+env file** (`EnvFileS3Bucket` + `EnvFileS3Key`), it can upload the file — and
+optionally create the bucket — *before* deploying. This matters because an ECS
+task downloads its env file from S3 **before the container starts**, so the file
+must already be there or the task fails to launch. It works for **both options**
+(any params file that names an env file).
+
+Two env variables control it (they do nothing when the params don't reference an
+env file, so `deploy.sh` stays a plain wrapper the rest of the time):
+
+- `ENV_FILE=<path>` — a local `.env` to upload to S3 before deploying. Omit it to
+  assume the file is already in S3 (the real BeED case — the shared bucket exists
+  and settings were uploaded once).
+- `CREATE_BUCKET=1` — also create the bucket first, as a `<stack>-envbucket` stack.
+  Only for a throwaway demo; real deploys leave it off because the shared bucket
+  (like `acdstagingbucket`) already exists.
+
+`teardown.sh` mirrors it: pass the **params file as the 2nd argument** (same
+position idea as `deploy.sh`, where the params file also comes before
+region/profile) and it removes what the deploy added — the **demo bucket** if
+`deploy.sh` created one, otherwise just **this service's `.env` object** (the
+shared bucket and other services' files are left untouched). Omit it for a stack
+with no env file.
+
+```bash
+# Self-contained env-file demo, Option A (create bucket, upload, deploy, then clean up):
+ENV_FILE=env-file/sample-service.env CREATE_BUCKET=1 \
+  ./scripts/deploy.sh option-a-parity/backend-service.yaml demo-a-env \
+  option-a-parity/params/demo-service-envfile.json
+
+curl http://<AlbDnsName>/                                  # 200 = task read the .env from S3
+
+./scripts/teardown.sh demo-a-env \
+  option-a-parity/params/demo-service-envfile.json         # removes the .env + the demo bucket
+
+# Same for Option B (after the platform stack is up) — its task runs in a PRIVATE
+# subnet and pulls the .env from S3 through the NAT gateway:
+ENV_FILE=env-file/sample-service.env CREATE_BUCKET=1 \
+  ./scripts/deploy.sh option-b-redesign/service-stack.yaml demo-b-env \
+  option-b-redesign/params/demo-service-envfile.json
+```
+
+A real deploy is just the same command with the env vars omitted (bucket already
+exists, file already uploaded), e.g. params pointing at `acdstagingbucket`.
 
 `quick-test.sh` tears down even if the deploy or the curl fails, so it never
 leaves a half-broken stack (or its hourly ALB charge) behind unless you pass
@@ -112,9 +164,12 @@ a small `service-stack.yaml` deploy that attaches to it via cross-stack exports.
 3. **One shared ECS cluster per environment.** Clusters are free logical
    groupings; 22 single-service clusters just multiply operational surface
    (Container Insights, capacity providers, ECS Exec config) by 22.
-4. **Secrets Manager / SSM instead of S3 `.env` files.** Rotation support, per-
-   secret CloudTrail audit trail, resource-level IAM per service — versus
-   plaintext production credentials in a bucket named `acdstagingbucket`.
+4. **Secrets Manager / SSM available for sensitive config.** Option B's service
+   template supports an S3 `.env` file (parity with today) **and** a Secrets
+   Manager secret — the recommendation is to keep bulk non-secret config in the
+   `.env` and move sensitive values (DB passwords, JWT keys) into a secret, which
+   adds rotation, per-secret CloudTrail audit, and resource-level IAM — versus
+   plaintext credentials in a bucket named `acdstagingbucket`.
 5. **Target-tracking autoscaling (CPU 70%), min 2 tasks across 2 AZs.** Today
    every service runs exactly 1 task — a crash or a deploy is downtime. Min 2
    across AZs is genuine high availability; scaling handles load spikes.

@@ -42,7 +42,8 @@ cleanup() {
   echo ""
   echo "=== [4/4] Teardown ==="
   # "|| true" so a teardown hiccup doesn't itself abort the script.
-  "$SCRIPT_DIR/teardown.sh" "$STACK_NAME" "$REGION" "$PROFILE" || true
+  # 2nd arg is the params file (empty here - quick-test uses no env file).
+  "$SCRIPT_DIR/teardown.sh" "$STACK_NAME" "" "$REGION" "$PROFILE" || true
 }
 trap cleanup EXIT     # run cleanup() automatically when the script exits
 
