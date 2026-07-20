@@ -15,6 +15,11 @@
 # -o pipefail make a pipeline fail if any stage fails.
 set -euo pipefail
 
+# AWS CLI v2 pipes output through an interactive pager (more/less) when stdout is
+# a terminal; under Git Bash that pager waits for a keypress the script never
+# sends, hanging forever. Empty AWS_PAGER = print directly, no pager.
+export AWS_PAGER=""
+
 # Note: we do NOT set MSYS_NO_PATHCONV here. All parameter values reach AWS via the
 # params file (file://...), never as inline "/..." arguments, so Git Bash's path
 # conversion is harmless - and we rely on it to turn the absolute template path

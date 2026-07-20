@@ -11,6 +11,11 @@
 #   -o pipefail = a pipeline fails if any stage fails.
 set -euo pipefail
 
+# AWS CLI v2 pipes output through an interactive pager (more/less) when stdout is
+# a terminal; under Git Bash that pager waits for a keypress the script never
+# sends, hanging forever. Empty AWS_PAGER = print directly, no pager.
+export AWS_PAGER=""
+
 REGION="${1:-ap-southeast-1}"   # arg #1 or default region
 PROFILE="${2:-default}"         # arg #2 or default credentials
 

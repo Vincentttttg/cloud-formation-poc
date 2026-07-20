@@ -16,6 +16,11 @@
 # Strict mode: stop on error, error on undefined var, fail pipelines properly.
 set -euo pipefail
 
+# AWS CLI v2 pipes output through an interactive pager (more/less) when stdout is
+# a terminal; under Git Bash that pager waits for a keypress the script never
+# sends, hanging forever. Empty AWS_PAGER = print directly, no pager.
+export AWS_PAGER=""
+
 STACK_NAME="${1:?stack name required}"   # which stack to delete (required)
 PARAMS="${2:-}"                          # optional params file (for env-file cleanup)
 REGION="${3:-ap-southeast-1}"            # region (default ap-southeast-1)

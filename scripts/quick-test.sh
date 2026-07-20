@@ -13,6 +13,11 @@
 # Strict mode: stop on error, error on undefined variable, fail pipelines properly.
 set -euo pipefail
 
+# AWS CLI v2 pipes output through an interactive pager (more/less) when stdout is
+# a terminal; under Git Bash that pager waits for a keypress the script never
+# sends, hanging forever. Empty AWS_PAGER = print directly, no pager.
+export AWS_PAGER=""
+
 # Arguments, each with a default (${N:-default}) so you can run it with none.
 STACK_NAME="${1:-demo-api-test}"                              # name for the test stack
 PARAMS_FILE="${2:-option-a-parity/params/demo-service-dev.json}"  # which params to deploy
